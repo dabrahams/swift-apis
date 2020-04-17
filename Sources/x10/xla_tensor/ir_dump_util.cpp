@@ -20,10 +20,11 @@
 
 #include "absl/container/node_hash_map.h"
 #include "absl/types/optional.h"
-#include "tensorflow/compiler/xla/xla_client/debug_macros.h"
-#include "tensorflow/compiler/xla/xla_client/xla_util.h"
+#include "tensorflow/compiler/tf2xla/xla_tensor/debug_util.h"
 #include "tensorflow/compiler/tf2xla/xla_tensor/ir_util.h"
 #include "tensorflow/compiler/tf2xla/xla_tensor/lowering_context.h"
+#include "tensorflow/compiler/xla/xla_client/debug_macros.h"
+#include "tensorflow/compiler/xla/xla_client/xla_util.h"
 
 namespace swift_xla {
 namespace ir {
@@ -166,9 +167,13 @@ std::string GenerateDotNodeSpec(
   return ss.str();
 }
 
-std::string GenerateTextNodeSpec(const Node* node, const NodeIdMap& id_map) {
+std::string GenerateTextNodeSpec(const Node* node, const NodeIdMap& id_map,
+                                 bool with_shape) {
   std::stringstream ss;
-  ss << node->shape() << " " << node->op() << "(";
+  if (with_shape) {
+    ss << node->shape() << " ";
+  }
+  ss << node->op() << "(";
   size_t count = 0;
   for (auto& output : node->operands()) {
     if (count > 0) {
@@ -187,7 +192,60 @@ std::string GenerateTextNodeSpec(const Node* node, const NodeIdMap& id_map) {
   return ss.str();
 }
 
+std::string GenerateTextNodeSpec(const Node* node, const NodeIdMap& id_map) {
+  return GenerateTextNodeSpec(node, id_map, true);
+}
+
+struct NodeInfo {
+  std::string text;
+  xla::Shape shape;
+  std::vector<SourceLocation> backtrace;
+};
+
+thread_local std::map<xla::hash_t, std::vector<NodeInfo>> g_graphs;
+
 }  // namespace
+
+void ProfileDynamicShapes(absl::Span<const Node* const> roots) {
+  auto post_order = Util::ComputePostOrder(roots);
+  std::unordered_map<const Node*, size_t> roots_ids = GetRootsIds(roots);
+  NodeIdMap id_map = GenerateIdMap(post_order);
+  std::vector<NodeInfo> serialized;
+  xla::hash_t h = 0x85ebca77c2b2ae63;
+  for (auto node : post_order) {
+    auto opt_root_id = GetRootNodeId(node, roots_ids);
+    NodeInfo node_info;
+    std::stringstream ss;
+    ss << "%" << id_map.at(node) << " = "
+       << GenerateTextNodeSpec(node, id_map, false);
+    if (opt_root_id) {
+      ss << ", ROOT=" << *opt_root_id;
+    }
+    node_info.text = ss.str();
+    h = xla::util::HashCombine(h, xla::util::Hash(node_info.text));
+    node_info.shape = node->shape();
+    node_info.backtrace = node->metadata().frame_info;
+    serialized.push_back(node_info);
+  }
+  const auto old_it = g_graphs.find(h);
+  if (old_it == g_graphs.end()) {
+    LOG(ERROR) << "New graph structure";
+  } else {
+    const auto& old_serialized = old_it->second;
+    for (size_t i = 0; i < post_order.size(); ++i) {
+      const auto crt = serialized[i];
+      const auto old = old_serialized[i];
+      if (crt.shape != old.shape) {
+        LOG(ERROR) << "Found different shape: " << crt.shape << " vs "
+                   << old.shape << " for:\n  " << crt.text;
+        LOG(ERROR) << "Current trace:\n" << crt.backtrace;
+        LOG(ERROR) << "Previous trace:\n" << old.backtrace;
+        break;
+      }
+    }
+  }
+  g_graphs.emplace(h, serialized);
+}
 
 std::string DumpUtil::ToDot(absl::Span<const Node* const> nodes) {
   auto post_order = Util::ComputePostOrder(nodes);

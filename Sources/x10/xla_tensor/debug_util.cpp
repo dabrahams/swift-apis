@@ -86,6 +86,9 @@ std::string DebugUtil::GetTensorsGraphInfo(absl::Span<const XLATensor> tensors,
       }
     }
   }
+  if (ir::Node::s_capture_stack_trace_) {
+    ProfileDynamicShapes(root_nodes);
+  }
   std::stringstream ss;
   ss << "TensorsGraphInfo:\n";
   ss << GetSwiftFrames();

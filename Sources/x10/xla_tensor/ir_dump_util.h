@@ -39,5 +39,7 @@ class DumpUtil {
   static std::string ToHlo(absl::Span<const Value> values);
 };
 
+void ProfileDynamicShapes(absl::Span<const Node* const> roots);
+
 }  // namespace ir
 }  // namespace swift_xla
